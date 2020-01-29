@@ -972,13 +972,15 @@ class AsyncWriter(threading.Thread, IndexWriter):
     >>> writer = AsyncWriter(myindex)
     """
 
-    def __init__(self, index, delay=0.25, writerargs=None):
+    def __init__(self, index, delay=0.25, max_retries=0, writerargs=None):
         """
         :param index: the :class:`whoosh.index.Index` to write to.
         :param delay: the delay (in seconds) between attempts to instantiate
             the actual writer.
         :param writerargs: an optional dictionary specifying keyword arguments
             to to be passed to the index's ``writer()`` method.
+        :param max_retries: the maximum number of attempts to instantiate the
+            actual writer. If the value is 0, retry indefinitely.
         """
 
         threading.Thread.__init__(self)
@@ -986,6 +988,7 @@ class AsyncWriter(threading.Thread, IndexWriter):
         self.index = index
         self.writerargs = writerargs or {}
         self.delay = delay
+        self.max_retries = max_retries
         self.events = []
         try:
             self.writer = self.index.writer(**self.writerargs)
@@ -1008,11 +1011,18 @@ class AsyncWriter(threading.Thread, IndexWriter):
     def run(self):
         self.running = True
         writer = self.writer
-        while writer is None:
+        retry_attempts = 0
+        while writer is None and (self.max_retries == 0 or retry_attempts <= self.max_retries):
             try:
                 writer = self.index.writer(**self.writerargs)
             except LockError:
+                retry_attempts += 1
                 time.sleep(self.delay)
+
+        if retry_attempts > self.max_retries > 0:
+            raise LockError("Failed to acquire index lock after "
+                            "{max_retries} attempts.".format(max_retries=self.max_retries))
+
         for method, args, kwargs in self.events:
             getattr(writer, method)(*args, **kwargs)
         writer.commit(*self.commitargs, **self.commitkwargs)
